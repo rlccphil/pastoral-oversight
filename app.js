@@ -19,6 +19,20 @@
   });
   function lessonById(id) { for (var i = 0; i < LESSONS.length; i++) if (LESSONS[i].id === id) return LESSONS[i]; return null; }
 
+  var ACT = {};
+  LESSONS.forEach(function (L) { L.cards.forEach(function (c) { if (c.t === 'action') ACT[L.id] = c; }); });
+  function actionDone(L) { var c = ACT[L.id]; if (!c) return true; var a = st.act[c.id]; return !!(a && a.done); }
+  function lessonFull(L) { return lessonDone(L) === L.cards.length && actionDone(L); }
+  function unlocked(L) { if (L.id === LESSONS[0].id) return true; var p = lessonById(L.id - 1); return !p || lessonFull(p); }
+  function lessonSteps(L) { var hasA = !!ACT[L.id]; return { d: lessonDone(L) + (hasA && actionDone(L) ? 1 : 0), n: L.cards.length + (hasA ? 1 : 0) }; }
+  function allFull() { return LESSONS.every(lessonFull); }
+  function completedAt() {
+    var m = 0, k;
+    for (k in st.done) if (st.done[k] > m) m = st.done[k];
+    for (k in st.act) if (st.act[k].done && st.act[k].done > m) m = st.act[k].done;
+    return m;
+  }
+
   /* ---------- helpers ---------- */
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function md(s) {
@@ -39,6 +53,7 @@
     close: '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
     back: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>',
     next: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>',
+    lock: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/></svg>',
     eye: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>'
   };
 
@@ -83,16 +98,17 @@
   function summary() {
     var done = 0, aC = 0, aD = 0, ld = 0;
     LESSONS.forEach(function (L) {
-      var d = 0;
       L.cards.forEach(function (c) {
-        if (st.done[c.id]) d++;
+        if (st.done[c.id]) done++;
         if (c.t === 'action') { var a = st.act[c.id]; if (a && a.at) aC++; if (a && a.done) aD++; }
       });
-      done += d; if (d === L.cards.length) ld++;
+      if (lessonFull(L)) ld++;
     });
+    var steps = done + aD, total = TOTAL + ACTIONS, nl = nextLesson();
     return {
-      course: COURSE.id, cardsDone: done, totalCards: TOTAL, percent: Math.round(done / TOTAL * 100),
-      lessonsDone: ld, totalLessons: LESSONS.length, actionsCommitted: aC, actionsDone: aD, totalActions: ACTIONS
+      course: COURSE.id, cardsDone: done, totalCards: TOTAL, stepsDone: steps, totalSteps: total, percent: Math.round(steps / total * 100),
+      lessonsDone: ld, totalLessons: LESSONS.length, actionsCommitted: aC, actionsDone: aD, totalActions: ACTIONS,
+      next: nl ? { id: nl.id, title: nl.title, pending: lessonDone(nl) === nl.cards.length && !actionDone(nl) } : null
     };
   }
   function lessonDone(L) { var n = 0; L.cards.forEach(function (c) { if (st.done[c.id]) n++; }); return n; }
@@ -241,7 +257,7 @@
         if (r && r.needCode) { document.getElementById('coderow').hidden = false; form.code.focus(); }
         throw new Error((r && r.error) || 'Something went wrong. Please try again.');
       }
-      sess = { token: r.token, name: r.name, email: r.email };
+      sess = { token: r.token, name: r.name, email: r.email, remind: r.remind !== false };
       jset(sessionStorage, 'ro_sess', sess);
       startSession(r.state);
       location.hash = '#/'; render();
@@ -254,7 +270,7 @@
 
   /* ----- home ----- */
   function nextLesson() {
-    for (var i = 0; i < LESSONS.length; i++) if (lessonDone(LESSONS[i]) < LESSONS[i].cards.length) return LESSONS[i];
+    for (var i = 0; i < LESSONS.length; i++) if (!lessonFull(LESSONS[i])) return LESSONS[i];
     return null;
   }
   function ring(pct) {
@@ -274,24 +290,29 @@
     return out;
   }
   function viewHome() {
-    var s = summary(), nl = nextLesson(), started = s.cardsDone > 0;
-    var cta = nl ? ((started ? 'Continue: ' : 'Start: ') + 'Lesson ' + nl.id) : 'Review the lessons';
-    var h = header('<span class="sync" id="sync" aria-live="polite">' + esc(syncLabel()) + '</span><button class="link" data-a="logout">Log out</button>');
+    var s = summary(), nl = nextLesson(), started = s.stepsDone > 0, finished = !nl;
+    var pending = nl && lessonDone(nl) === nl.cards.length && !actionDone(nl);
+    var cta = finished ? 'Review the lessons' : pending ? 'Mark your Lesson ' + nl.id + ' action done' : ((started ? 'Continue: ' : 'Start: ') + 'Lesson ' + nl.id);
+    var h = header('<span class="sync' + (syncMsg === 'offline' ? ' warn' : '') + '" id="sync" aria-live="polite">' + esc(syncLabel()) + '</span><button class="link" data-a="logout">Log out</button>');
     h += '<main class="home wrap"><div class="home-l">' +
       '<section class="hero"><div class="hero-t"><h1>' + (started ? 'Welcome back, ' : 'Welcome, ') + esc(firstName(sess.name)) + '.</h1>' +
-      '<p>' + (s.percent === 100 ? 'You have completed the path. Keep your commitments and keep multiplying leaders.' : 'Ten short lessons, each ending with something to do. A steady pace is one lesson a week.') + '</p></div>' +
+      '<p>' + (finished ? 'You have completed the path. Keep your commitments and keep multiplying leaders.' : 'Ten short lessons, each ending with something to do. The next lesson opens once you mark that action done.') + '</p></div>' +
       ring(s.percent) + '</section>' +
-      '<p class="stats">' + s.cardsDone + ' of ' + s.totalCards + ' steps &middot; ' + s.lessonsDone + ' of ' + s.totalLessons + ' lessons &middot; ' + s.actionsDone + ' of ' + s.totalActions + ' actions done</p>' +
-      '<button class="btn primary block" data-a="open" data-l="' + (nl ? nl.id : 1) + '" data-r="1">' + esc(cta) + '</button>' +
+      '<p class="stats">' + s.stepsDone + ' of ' + s.totalSteps + ' steps &middot; ' + s.lessonsDone + ' of ' + s.totalLessons + ' lessons &middot; ' + s.actionsDone + ' of ' + s.totalActions + ' actions done</p>' +
+      (finished ? '<div class="certcard"><h2>Your certificate is ready</h2><p>Thank you for finishing every lesson and putting each one into practice.</p><button class="btn gold block" data-a="cert">View your certificate</button></div>' : '') +
+      '<button class="btn ' + (finished ? 'ghost' : 'primary') + ' block" data-a="' + (pending ? 'toacts' : 'open') + '" data-l="' + (nl ? nl.id : 1) + '" data-r="1">' + esc(cta) + '</button>' +
       actionsHTML() + '</div>' +
       '<section class="home-r" aria-labelledby="lh"><h2 id="lh" class="sec">Lessons</h2><ol class="lessons">' +
       LESSONS.map(function (L) {
-        var d = lessonDone(L), n = L.cards.length, pct = Math.round(d / n * 100), full = d === n;
-        return '<li><button class="lrow' + (full ? ' full' : '') + '" data-a="open" data-l="' + L.id + '">' +
-          '<span class="num">' + (full ? I.check : L.id) + '</span>' +
-          '<span class="ltxt"><span class="lt">' + esc(L.title) + '</span><span class="lm">' + (full ? 'Complete' : d ? d + ' of ' + n + ' steps' : n + ' steps &middot; ' + L.minutes + ' min') + '</span>' +
-          '<span class="mini" aria-hidden="true"><i style="width:' + pct + '%"></i></span></span>' + '<span class="chev">' + I.next + '</span></button></li>';
+        var ls = lessonSteps(L), pct = Math.round(ls.d / ls.n * 100), full = lessonFull(L), lock = !unlocked(L);
+        var cardsAll = lessonDone(L) === L.cards.length;
+        var meta = lock ? 'Locked. Mark the Lesson ' + (L.id - 1) + ' action done to open it.' : full ? 'Complete' : cardsAll ? 'Do your action to finish' : ls.d ? ls.d + ' of ' + ls.n + ' steps' : ls.n + ' steps &middot; ' + L.minutes + ' min';
+        return '<li><button class="lrow' + (full ? ' full' : '') + (lock ? ' locked' : '') + '"' + (lock ? ' disabled' : ' data-a="open" data-l="' + L.id + '"') + '>' +
+          '<span class="num">' + (full ? I.check : lock ? I.lock : L.id) + '</span>' +
+          '<span class="ltxt"><span class="lt">' + esc(L.title) + '</span><span class="lm">' + meta + '</span>' +
+          '<span class="mini" aria-hidden="true"><i style="width:' + pct + '%"></i></span></span>' + (lock ? '' : '<span class="chev">' + I.next + '</span>') + '</button></li>';
       }).join('') + '</ol></section></main>' +
+      (DEMO ? '' : '<p class="prefs">Email reminders are ' + (sess.remind === false ? 'off' : 'on') + '. <button class="link" data-a="remind">' + (sess.remind === false ? 'Turn on' : 'Turn off') + '</button></p>') +
       '<footer class="foot"><p>Pastors equip and oversee. Lay leaders lead and multiply. The whole church participates in God’s mission.</p></footer>';
     app.innerHTML = h;
   }
@@ -318,7 +339,7 @@
       '<main class="intro wrap-s"><p class="lno">Lesson ' + L.id + ' of ' + LESSONS.length + '</p><h1>' + esc(L.title) + '</h1>' +
       '<p class="meta">' + n + ' steps &middot; about ' + L.minutes + ' minutes</p>' +
       '<div class="outcome"><h2>After this lesson you will be able to</h2><p>' + esc(L.outcome.charAt(0).toLowerCase() + L.outcome.slice(1)) + '</p></div>' +
-      '<p class="note">Every lesson ends with something to do. Learning sticks when you put it into practice.</p>' +
+      '<p class="note">Every lesson ends with something to do. ' + (lessonById(L.id + 1) ? 'Mark that action done to open Lesson ' + (L.id + 1) + '.' : 'Mark it done to receive your certificate.') + '</p>' +
       '<button class="btn primary block" data-a="begin">' + (d === n ? 'Review lesson' : d ? 'Resume lesson' : 'Start lesson') + '</button>' +
       (L.id > 1 ? '<button class="btn ghost block" data-a="open" data-l="' + (L.id - 1) + '">Previous lesson</button>' : '') +
       '</main>';
@@ -486,26 +507,88 @@
   }
 
   function viewEnd(L) {
-    var s = summary(), nxt = lessonById(L.id + 1);
-    var acts = L.cards.filter(function (c) { return c.t === 'action' && st.act[c.id] && st.act[c.id].at; });
-    var last = !nxt;
+    var s = summary(), nxt = lessonById(L.id + 1), ac = ACT[L.id], act = ac ? st.act[ac.id] : null;
+    var full = lessonFull(L), last = !nxt, waiting = ac && !(act && act.done);
     app.innerHTML = header('<button class="link" data-a="home">Home</button>') +
-      '<main class="end wrap-s"><div class="badge">' + I.check + '</div><p class="lno">Lesson ' + L.id + ' complete</p><h1>' + (last ? 'You have finished the path.' : 'Well done.') + '</h1>' +
-      '<p class="lead">' + (last ? 'The work now moves from the screen to your communities. Keep coaching, keep releasing, and keep multiplying leaders. “Entrust to faithful people who will be able to teach others also.” (2 Timothy 2:2)' : 'You have completed ' + esc(L.title) + '. What you do next matters more than what you read.') + '</p>' +
-      (acts.length ? '<div class="outcome"><h2>Your commitment</h2>' + acts.map(function (c) { return '<p><strong>' + esc(c.title) + '</strong><br>Due ' + esc(fmtDate(st.act[c.id].due)) + '</p>'; }).join('') + '</div>' : '') +
+      '<main class="end wrap-s"><div class="badge">' + I.check + '</div><p class="lno">Lesson ' + L.id + ' ' + (full ? 'complete' : 'learned') + '</p><h1>' + (full && last ? 'You have finished the path.' : full ? 'Well done.' : 'Now put it into practice.') + '</h1>' +
+      '<p class="lead">' + (full && last ? 'The work now moves from the screen to your communities. Keep coaching, keep releasing, and keep multiplying leaders. “Entrust to faithful people who will be able to teach others also.” (2 Timothy 2:2)' :
+        full ? 'You have completed ' + esc(L.title) + ' and done the action. That is how learning becomes leadership.' :
+          'You have finished the cards for ' + esc(L.title) + '. The lesson is complete when you have done your action and marked it done.') + '</p>' +
+      (waiting && act && act.at ? '<div class="outcome"><h2>Your action</h2><p><strong>' + esc(ac.title) + '</strong><br>Due ' + esc(fmtDate(act.due)) + '</p>' +
+        '<label class="endlab">What happened? (optional)<textarea id="endnote" rows="3" maxlength="500"></textarea></label>' +
+        '<button class="btn gold block" data-a="enddone">I’ve done this action</button>' +
+        '<p class="fine">' + (nxt ? 'You can also do this later from the home screen. Lesson ' + nxt.id + ' opens once it is marked done.' : 'Your certificate is ready once it is marked done.') + '</p></div>' : '') +
+      (full && act && act.done && act.note ? '<div class="outcome"><h2>What happened</h2><p>' + esc(act.note) + '</p></div>' : '') +
       '<p class="stats">Overall progress: ' + s.percent + '% (' + s.lessonsDone + ' of ' + s.totalLessons + ' lessons)</p>' +
-      (nxt ? '<button class="btn primary block" data-a="open" data-l="' + nxt.id + '">Next: ' + esc(nxt.title) + '</button>' : '') +
-      '<button class="btn ' + (nxt ? 'ghost' : 'primary') + ' block" data-a="home">Back to home</button></main>';
+      (last && full ? '<button class="btn gold block" data-a="cert">View your certificate</button>' : '') +
+      (nxt ? (full ? '<button class="btn primary block" data-a="open" data-l="' + nxt.id + '">Next: ' + esc(nxt.title) + '</button>' :
+        '<button class="btn primary block" disabled>Lesson ' + nxt.id + ' opens after your action</button>') : '') +
+      '<button class="btn ghost block" data-a="home">Back to home</button></main>';
     window.scrollTo(0, 0);
+  }
+
+  /* ----- certificate ----- */
+  function certDate() { return new Date(completedAt() || Date.now()).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }); }
+  function viewCert() {
+    var nm = esc(sess.name), dt = esc(certDate());
+    app.innerHTML = '<div class="noprint">' + header('<button class="link" data-a="home">Home</button>') + '</div>' +
+      '<main class="certwrap"><div class="cert"><div class="cert-in">' +
+      '<div class="c-band"><img src="assets/logo-white.png" alt="Real Life Christian Communities"></div>' +
+      '<div class="c-body"><p class="c-kick">Certificate of Completion</p><p class="c-this">This certifies that</p><h1 class="c-name">' + nm + '</h1>' +
+      '<p class="c-txt">has completed the ten-lesson learning path</p><h2 class="c-course">' + esc(COURSE.title) + '</h2>' +
+      '<p class="c-txt">developing and overseeing lay leaders,<br>with a practical action put into practice in every lesson.</p></div>' +
+      '<div class="c-foot"><div><p class="c-v">' + dt + '</p><p class="c-l">Date completed</p></div><p class="c-tag">Pastors equip and oversee. Lay leaders lead and multiply.</p>' +
+      '<div><p class="c-v">Bong Baylon</p><p class="c-l">Senior Pastor, RLCC</p></div></div></div></div>' +
+      '<div class="cert-actions noprint"><button class="btn primary" data-a="print">Print or save as PDF</button><button class="btn ghost" data-a="dlcert">Download image</button></div>' +
+      '<p class="fine noprint ctr">On a phone, turn it sideways to see the certificate larger.</p></main>';
+    window.scrollTo(0, 0);
+  }
+  function downloadCert() {
+    var W = 2000, H = 1414, cv = document.createElement('canvas'); cv.width = W; cv.height = H; var x = cv.getContext('2d');
+    var F = Promise.all([document.fonts.load('600 80px Newsreader'), document.fonts.load('italic 400 40px Newsreader'), document.fonts.load('600 40px Figtree'), document.fonts.load('400 40px Figtree')]).catch(function () { });
+    var img = new Image();
+    var loaded = new Promise(function (res) { img.onload = res; img.onerror = res; img.src = 'assets/logo-white.png'; });
+    Promise.all([F, loaded]).then(function () {
+      function t(s, px, y, font, col, ax) { x.font = font; x.fillStyle = col; x.textAlign = ax || 'center'; x.fillText(s, ax === 'left' ? 170 : ax === 'right' ? W - 170 : W / 2, y); }
+      x.fillStyle = '#fff'; x.fillRect(0, 0, W, H);
+      x.fillStyle = '#365233'; x.fillRect(0, 0, W, 330);
+      var lw = 720, lh = lw * (img.height / img.width || .11); x.drawImage(img, (W - lw) / 2, 165 - lh / 2, lw, lh);
+      x.fillStyle = '#E0A93B'; x.fillRect(0, 330, W, 10);
+      x.strokeStyle = '#365233'; x.lineWidth = 5; x.strokeRect(50, 50, W - 100, H - 100);
+      t('Certificate of Completion', 0, 478, '600 88px Newsreader, Georgia, serif', '#365233');
+      t('This certifies that', 0, 580, '400 42px Figtree, sans-serif', '#566757');
+      var nm = sess.name, fs = 140; x.font = '600 ' + fs + 'px Newsreader, Georgia, serif'; while (x.measureText(nm).width > W - 360 && fs > 60) { fs -= 6; x.font = '600 ' + fs + 'px Newsreader, Georgia, serif'; }
+      t(nm, 0, 730, '600 ' + fs + 'px Newsreader, Georgia, serif', '#1A2A1B');
+      x.fillStyle = '#D6DFD0'; x.fillRect(W / 2 - 450, 770, 900, 3);
+      t('has completed the ten-lesson learning path', 0, 850, '400 42px Figtree, sans-serif', '#566757');
+      t(COURSE.title, 0, 960, '600 96px Newsreader, Georgia, serif', '#365233');
+      t('developing and overseeing lay leaders,', 0, 1045, '400 42px Figtree, sans-serif', '#566757');
+      t('with a practical action put into practice in every lesson.', 0, 1100, '400 42px Figtree, sans-serif', '#566757');
+      x.fillStyle = '#365233'; x.fillRect(170, 1196, 420, 3); x.fillRect(W - 590, 1196, 420, 3);
+      t(certDate(), 0, 1176, '600 40px Figtree, sans-serif', '#1A2A1B', 'left');
+      t('Date completed', 0, 1245, '400 30px Figtree, sans-serif', '#566757', 'left');
+      t('Bong Baylon', 0, 1176, '600 40px Figtree, sans-serif', '#1A2A1B', 'right');
+      t('Senior Pastor, RLCC', 0, 1245, '400 30px Figtree, sans-serif', '#566757', 'right');
+      t('Pastors equip and oversee. Lay leaders lead and multiply.', 0, 1300, 'italic 400 40px Newsreader, Georgia, serif', '#7A5A10');
+      cv.toBlob(function (b) {
+        var u = URL.createObjectURL(b), l = document.createElement('a');
+        l.href = u; l.download = 'Pastoral-Oversight-Certificate-' + sess.name.replace(/[^A-Za-z0-9]+/g, '-') + '.png';
+        document.body.appendChild(l); l.click(); l.remove(); setTimeout(function () { URL.revokeObjectURL(u); }, 4000);
+      }, 'image/png');
+    });
   }
 
   /* ---------- router ---------- */
   function render(o) {
     if (!sess) { viewAuth(o); return; }
+    if (location.hash === '#/certificate') {
+      if (!allFull()) { location.hash = '#/'; return; }
+      view = { lesson: null, idx: 0, phase: 'intro' }; viewCert(); return;
+    }
     var m = /^#\/lesson\/(\d+)/.exec(location.hash);
     if (m) {
       var L = lessonById(+m[1]);
-      if (!L) { location.hash = '#/'; return; }
+      if (!L || !unlocked(L)) { location.hash = '#/'; return; }
       if (view.lesson !== L.id) view = { lesson: L.id, idx: 0, phase: 'intro' };
       if (view.phase === 'intro') viewIntro(L); else if (view.phase === 'end') viewEnd(L); else viewPlayer(L);
       if (view.phase !== 'cards') window.scrollTo(0, 0);
@@ -518,6 +601,7 @@
   /* ---------- actions ---------- */
   function setDone(id, note) {
     var a = st.act[id] ? JSON.parse(JSON.stringify(st.act[id])) : { at: Date.now(), due: plusDays(7) };
+    if (!a.title && CARD[id]) { a.title = CARD[id].c.title; a.l = CARD[id].L.id; }
     a.done = Date.now(); a.note = note || ''; touch('act', id, a);
   }
   function goNext() {
@@ -543,11 +627,21 @@
       case 'home': location.hash = '#/'; break;
       case 'open':
         var lid = +t.dataset.l, Lo = lessonById(lid);
+        if (!Lo || !unlocked(Lo)) break;
         view = { lesson: lid, idx: 0, phase: 'intro' };
         if (t.dataset.r && lessonDone(Lo) > 0 && lessonDone(Lo) < Lo.cards.length) { view.idx = firstUndone(Lo); view.phase = 'cards'; }
         if (location.hash === '#/lesson/' + lid) render(); else location.hash = '#/lesson/' + lid;
         break;
       case 'begin': L = lessonById(view.lesson); view.idx = lessonDone(L) === L.cards.length ? 0 : firstUndone(L); view.phase = 'cards'; render(); break;
+      case 'toacts': var ah = document.getElementById('ah'); if (ah) ah.scrollIntoView({ block: 'start' }); break;
+      case 'cert': location.hash = '#/certificate'; break;
+      case 'print': window.print(); break;
+      case 'dlcert': downloadCert(); break;
+      case 'enddone':
+        L = lessonById(view.lesson); setDone(ACT[L.id].id, (document.getElementById('endnote') || {}).value ? document.getElementById('endnote').value.trim() : ''); flush(); viewEnd(L); break;
+      case 'remind':
+        sess.remind = sess.remind === false; jset(sessionStorage, 'ro_sess', sess); viewHome();
+        if (!DEMO) api('prefs', { token: sess.token, remind: sess.remind }).catch(function () { }); break;
       case 'next': goNext(); break;
       case 'prev': goPrev(); break;
       case 'pick':
@@ -566,7 +660,7 @@
         L = lessonById(view.lesson); c = L.cards[view.idx];
         var ex = st.act[c.id] || {};
         if (!fieldsOK(c, ex)) break;
-        var na = { due: document.getElementById('due').value || plusDays(7), at: Date.now(), done: null, note: '' };
+        var na = { due: document.getElementById('due').value || plusDays(7), at: Date.now(), done: null, note: '', title: c.title, l: L.id };
         if (ex.fields) na.fields = ex.fields;
         touch('act', c.id, na); markDone(c.id); viewPlayer(L, true); break;
       case 'cdone':
@@ -601,7 +695,7 @@
     startSession(null);
     if (!DEMO) {
       api('state', { token: sess.token }).then(function (r) {
-        if (r && r.ok && r.state) { st = merge(st, r.state); saveLocal(); if (view.phase !== 'cards') render(); }
+        if (r && r.ok && r.state) { st = merge(st, r.state); if (r.remind === false) { sess.remind = false; jset(sessionStorage, 'ro_sess', sess); } saveLocal(); if (view.phase !== 'cards') render(); }
         else if (r && r.error === 'session') logout('Your session ended. Please log in again.');
       }).catch(function () { });
     }

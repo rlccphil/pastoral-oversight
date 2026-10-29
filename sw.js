@@ -1,5 +1,5 @@
 /* Small offline shell. Bump VERSION whenever you publish new content. */
-var VERSION = 'ro-v1';
+var VERSION = 'ro-v2';
 var SHELL = ['./', 'index.html', 'config.js', 'content.js', 'app.js', 'manifest.webmanifest',
   'assets/logo.png', 'assets/logo-white.png', 'assets/figtree.woff2', 'assets/newsreader.woff2', 'assets/newsreader-italic.woff2'];
 self.addEventListener('install', function (e) { e.waitUntil(caches.open(VERSION).then(function (c) { return c.addAll(SHELL); }).then(function () { return self.skipWaiting(); })); });
